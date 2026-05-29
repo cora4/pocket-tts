@@ -21,13 +21,14 @@ from pocket_tts.default_parameters import (
     DEFAULT_LSD_DECODE_STEPS,
     DEFAULT_NOISE_CLAMP,
     DEFAULT_TEMPERATURE,
+    DEFAULT_VOICE_FALLBACK,
     MAX_TOKEN_PER_CHUNK,
     get_default_text_for_language,
     get_default_voice_for_language,
 )
 from pocket_tts.models.tts_model import TTSModel, export_model_state
 from pocket_tts.utils.logging_utils import enable_logging
-from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
+from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES, size_of_dict
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ cli_app = typer.Typer(
 
 # Global model instance
 tts_model: TTSModel | None = None
+global_model_state = None
 
 web_app = FastAPI(
     title="Kyutai Pocket TTS API", description="Text-to-Speech generation API", version="1.0.0"
@@ -135,9 +137,6 @@ def text_to_speech(
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-    if voice_url is None and voice_wav is None:
-        voice_url = get_default_voice_for_language(str(tts_model.origin))
-
     if voice_url is not None and voice_wav is not None:
         raise HTTPException(status_code=400, detail="Cannot provide both voice_url and voice_wav")
 
@@ -169,7 +168,9 @@ def text_to_speech(
         finally:
             os.unlink(temp_file_path)
     else:
-        raise HTTPException(status_code=500, detail="This should never happen.")
+        # Use default global model state
+        model_state = global_model_state
+        logging.warning("Using voice from command")
 
     return StreamingResponse(
         generate_data_with_state(text, model_state),
@@ -183,6 +184,9 @@ def text_to_speech(
 
 @cli_app.command()
 def serve(
+    voice: Annotated[
+        str, typer.Option(help="Path to voice prompt audio file (voice to clone)")
+    ] = DEFAULT_VOICE_FALLBACK,
     host: Annotated[str, typer.Option(help="Host to bind to")] = "localhost",
     port: Annotated[int, typer.Option(help="Port to bind to")] = 8000,
     reload: Annotated[bool, typer.Option(help="Enable auto-reload")] = False,
@@ -208,8 +212,12 @@ def serve(
 ):
     """Start the FastAPI server."""
 
-    global tts_model
+    global tts_model, global_model_state
     tts_model = TTSModel.load_model(language=language, config=config, quantize=quantize)
+
+    # Pre-load the voice prompt
+    global_model_state = tts_model.get_state_for_audio_prompt(voice)
+    logger.warning(f"The size of the model state is {size_of_dict(global_model_state) // 1e6} MB")
 
     uvicorn.run("pocket_tts.main:web_app", host=host, port=port, reload=reload)
 
